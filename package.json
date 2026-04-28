@@ -1,0 +1,27 @@
+{
+  "name": "piloto-dashboard-react",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "data": "py -3 scripts/build_dashboard_data.py",
+    "dev": "vite --host 127.0.0.1 --port 5173",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1 --port 4173"
+  },
+  "dependencies": {
+    "@tailwindcss/vite": "^4.1.12",
+    "leaflet": "^1.9.4",
+    "lucide-react": "^1.8.0",
+    "motion": "^12.38.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-leaflet": "^5.0.0",
+    "tailwindcss": "^4.1.12",
+    "xlsx-js-style": "^1.2.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^5.0.4",
+    "vite": "^7.2.0"
+  }
+}

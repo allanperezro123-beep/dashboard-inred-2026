@@ -1,0 +1,24 @@
+╔══════════════════════════════════════════════════════════════╗
+║              CARPETA DE DATOS — DASHBOARD INRED              ║
+╚══════════════════════════════════════════════════════════════╝
+
+Deja aquí tu Excel actualizado (.xlsx) y ejecuta:
+
+    python iniciar_dashboard.py
+
+El script tomará automáticamente el archivo .xlsx más reciente
+(ordenado por fecha de modificación) y actualizará el dashboard.
+
+────────────────────────────────────────────────────────────────
+RECOMENDACIONES:
+  • Nombra el archivo con la fecha para llevar historial, p.ej.:
+        tickets_2026-04-20.xlsx
+        tickets_2026-05-01.xlsx
+
+  • Puedes tener varios archivos aquí; siempre se usará el más
+    reciente. Los anteriores quedan como respaldo.
+
+  • Si quieres usar un archivo específico sin que sea el más
+    reciente, pásalo como argumento:
+        python iniciar_dashboard.py datos\tickets_2026-03-01.xlsx
+────────────────────────────────────────────────────────────────

@@ -1,0 +1,31 @@
+node_modules/
+dist/
+.vite/
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.log
+
+# Excel fuente (van en Drive, no en el repo)
+*.xlsx
+*.xls
+datos/
+"DATOS HOY/"
+DATOS HOY/
+
+# Credenciales (NUNCA subir)
+service-account*.json
+credentials*.json
+*-key.json
+
+# Firebase runtime
+.firebase/
+firebase-debug.log
+.firebaserc.local
+
+# OS
+.DS_Store
+Thumbs.db
+.env
+.env.*

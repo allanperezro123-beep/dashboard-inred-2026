@@ -1,0 +1,55 @@
+name: Sync Drive and Deploy Dashboard
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+
+jobs:
+  sync-and-deploy:
+    runs-on: ubuntu-latest
+    env:
+      DASHBOARD_DRIVE_FOLDER: ${{ secrets.DASHBOARD_DRIVE_FOLDER }}
+      DASHBOARD_GOOGLE_CREDENTIALS_JSON: ${{ secrets.DASHBOARD_GOOGLE_CREDENTIALS_JSON }}
+      FIREBASE_TOKEN: ${{ secrets.FIREBASE_TOKEN }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Download latest Excel from shared Drive folder
+        run: |
+          python scripts/download_latest_drive_excel.py \
+            --folder "$DASHBOARD_DRIVE_FOLDER" \
+            --output "datos/drive-latest.xlsx"
+
+      - name: Build dashboard dataset from Excel
+        run: python scripts/build_dashboard_data.py "datos/drive-latest.xlsx"
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Copy legacy dataset into dist
+        run: |
+          mkdir -p dist/data
+          cp data/dashboard-data.js dist/data/dashboard-data.js
+
+      - name: Deploy to Firebase Hosting
+        run: npx firebase-tools deploy --only hosting --token "$FIREBASE_TOKEN"

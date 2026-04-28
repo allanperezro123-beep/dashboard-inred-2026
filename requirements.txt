@@ -1,0 +1,4 @@
+geonamescache>=2.0.0
+google-api-python-client>=2.170.0
+google-auth>=2.39.0
+openpyxl>=3.1.0
