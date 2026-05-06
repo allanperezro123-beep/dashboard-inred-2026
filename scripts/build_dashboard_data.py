@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import sys
 import unicodedata
@@ -128,28 +129,17 @@ def resolve_source_path() -> Path:
             raise FileNotFoundError(f"No existe el archivo indicado: {candidate}")
         return candidate
 
-    # Busca primero en datos/ y luego en la raíz, pero solo usa archivos legibles.
-    candidates: list[Path] = []
-    datos_dir = ROOT / "datos"
-    if datos_dir.is_dir():
-        candidates.extend(sorted(datos_dir.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True))
-    candidates.extend(sorted(ROOT.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True))
+    env_source = os.environ.get("DASHBOARD_SOURCE_XLSX", "").strip()
+    if env_source:
+        candidate = Path(env_source).expanduser().resolve()
+        if not candidate.exists():
+            raise FileNotFoundError(f"No existe DASHBOARD_SOURCE_XLSX: {candidate}")
+        return candidate
 
-    for candidate in candidates:
-        try:
-            with candidate.open("rb"):
-                return candidate
-        except OSError:
-            continue
-
-    if not candidates:
-        raise FileNotFoundError(
-            "No se encontró ningún .xlsx.\n"
-            "Copia tu Excel actualizado en la carpeta datos/ y vuelve a intentarlo."
-        )
-    raise PermissionError(
-        "No se pudo abrir ningún .xlsx porque están bloqueados o sin permisos.\n"
-        "Cierra el archivo en Excel o copia otra versión legible en datos/."
+    raise FileNotFoundError(
+        "No se definió el archivo fuente del dataset.\n"
+        "Modo estricto activo: pasa el .xlsx por argumento o define DASHBOARD_SOURCE_XLSX.\n"
+        "La fuente oficial debe venir de Drive."
     )
 
 

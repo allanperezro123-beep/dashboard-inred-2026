@@ -43,6 +43,20 @@ Luego puedes usar el flujo automático recomendado:
 python iniciar_dashboard.py
 ```
 
+Si quieres que se actualice solo cuando entre un Excel nuevo en Drive (sin reiniciar):
+
+```powershell
+python iniciar_dashboard.py --watch-drive
+```
+
+Además, la app refresca el dataset en segundo plano cada 60 segundos y el `dashboard-data.json` se publica sin cache en Firebase para evitar que se muestren datos viejos.
+
+Opcionalmente puedes pasar la carpeta de Drive y el intervalo de chequeo:
+
+```powershell
+python iniciar_dashboard.py "https://drive.google.com/drive/folders/TU_FOLDER_ID" --watch-drive --poll-seconds 60
+```
+
 Si prefieres hacerlo por pasos, usa:
 
 ```powershell
@@ -112,11 +126,21 @@ pwsh -File scripts/bootstrap_cloud_automation.ps1 -GithubRepo "owner/repo" -Gith
 
 Frecuencia actual:
 
-- Cada 30 minutos (cron) y también manual (`workflow_dispatch`).
+- Cada 5 minutos (cron) y también manual (`workflow_dispatch`).
 
 ## Documentación
 
 La explicación detallada de la infraestructura, el Excel, el pipeline Python, el frontend y la operación diaria está en [docs/README.md](docs/README.md).
+
+## Autenticación en interfaz
+
+En la pantalla de acceso tienes tres opciones:
+
+- Ingresar.
+- Crear usuario.
+- Recuperar contraseña.
+
+Las credenciales se guardan en almacenamiento local del navegador (`localStorage`) para operación interna.
 
 ## Flujo lógico
 

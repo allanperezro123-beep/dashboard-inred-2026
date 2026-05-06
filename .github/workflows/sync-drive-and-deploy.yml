@@ -3,7 +3,7 @@ name: Sync Drive and Deploy Dashboard
 on:
   workflow_dispatch:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '*/5 * * * *'
 
 jobs:
   sync-and-deploy:
@@ -36,20 +36,61 @@ jobs:
 
       - name: Download latest Excel from shared Drive folder
         run: |
-          python scripts/download_latest_drive_excel.py \
+          if python scripts/download_latest_drive_excel.py \
             --folder "$DASHBOARD_DRIVE_FOLDER" \
-            --output "datos/drive-latest.xlsx"
+            --output "datos/drive-latest.xlsx"; then
+            echo "excel_found=true" >> "$GITHUB_ENV"
+          else
+            echo "excel_found=false" >> "$GITHUB_ENV"
+            echo "No hay Excel disponible en Drive. Se publicará dataset vacío para evitar datos desactualizados."
+          fi
 
       - name: Build dashboard dataset from Excel
+        if: env.excel_found == 'true'
         run: python scripts/build_dashboard_data.py "datos/drive-latest.xlsx"
+
+      - name: Build empty dataset fallback
+        if: env.excel_found != 'true'
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          payload = {
+              "meta": {
+                  "sourceFile": "(sin-archivo-drive)",
+                  "generatedAt": datetime.now(timezone.utc).isoformat(),
+                  "sheetNames": [],
+                  "recordCounts": {"tickets": 0, "stopEvents": 0, "orphanStopTickets": 0},
+                  "coverage": {
+                      "clientCreatedPct": 0,
+                      "technicianPct": 0,
+                      "maintenancePct": 0,
+                      "resolutionCommentPct": 0,
+                  },
+                  "geoCoverage": {},
+                  "nlpSummary": {},
+                  "warnings": ["No hay archivo Excel en la carpeta de Drive"],
+              },
+              "tickets": [],
+              "stopEvents": [],
+          }
+
+          Path("public/data").mkdir(parents=True, exist_ok=True)
+          Path("data").mkdir(parents=True, exist_ok=True)
+          Path("public/data/dashboard-data.json").write_text(
+              json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+              encoding="utf-8",
+          )
+          Path("data/dashboard-data.js").write_text(
+              "window.__DASHBOARD_DATA__ = " + json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + ";\n",
+              encoding="utf-8",
+          )
+          PY
 
       - name: Build frontend
         run: npm run build
-
-      - name: Copy legacy dataset into dist
-        run: |
-          mkdir -p dist/data
-          cp data/dashboard-data.js dist/data/dashboard-data.js
 
       - name: Deploy to Firebase Hosting
         run: npx firebase-tools deploy --only hosting --token "$FIREBASE_TOKEN"

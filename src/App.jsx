@@ -59,12 +59,14 @@ const KPI_DRILL = [
 const AUTH_USERS_KEY = 'inred.auth.users.v1';
 const AUTH_LOGS_KEY = 'inred.auth.logs.v1';
 const AUTH_SESSION_KEY = 'inred.auth.session.v1';
+const DATA_REFRESH_MS = 60000;
 
 const DEFAULT_AUTH_USERS = [
   { username: 'Allan_ADMIN', password: '150425', role: 'admin', createdAt: new Date().toISOString() },
   { username: 'Julio', password: '150425', role: 'operator', createdAt: new Date().toISOString() },
   { username: 'Andres_Santana', password: '150425', role: 'operator', createdAt: new Date().toISOString() },
   { username: 'Wilmer_MDA', password: '150425', role: 'operator', createdAt: new Date().toISOString() },
+  { username: 'Andrea_Corp', password: '150425', role: 'operator', createdAt: new Date().toISOString() },
 ];
 
 function loadUsers() {
@@ -75,8 +77,21 @@ function loadUsers() {
       return DEFAULT_AUTH_USERS;
     }
     const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return DEFAULT_AUTH_USERS;
-    return parsed;
+    if (!Array.isArray(parsed) || parsed.length === 0) {
+      localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(DEFAULT_AUTH_USERS));
+      return DEFAULT_AUTH_USERS;
+    }
+    // Merge: add any default users missing from stored list
+    const stored = [...parsed];
+    let changed = false;
+    for (const def of DEFAULT_AUTH_USERS) {
+      if (!stored.find(u => u.username === def.username)) {
+        stored.push(def);
+        changed = true;
+      }
+    }
+    if (changed) localStorage.setItem(AUTH_USERS_KEY, JSON.stringify(stored));
+    return stored;
   } catch {
     return DEFAULT_AUTH_USERS;
   }
@@ -104,13 +119,17 @@ export default function App() {
   const [authLogs, setAuthLogs] = useState(() => loadLogs());
   const [currentUser, setCurrentUser] = useState(() => localStorage.getItem(AUTH_SESSION_KEY) || '');
   const [authError, setAuthError] = useState('');
+  const [authInfo, setAuthInfo] = useState('');
+  const [authMode, setAuthMode] = useState('login');
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [newUserForm, setNewUserForm] = useState({ username: '', password: '' });
   const [passwordForm, setPasswordForm] = useState({ current: '', next: '' });
+  const [recoverForm, setRecoverForm] = useState({ username: '', next: '', confirm: '' });
 
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [dataSyncNote, setDataSyncNote] = useState('');
   const [view, setView] = useState('general');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [flags, setFlags] = useState(DEFAULT_FLAGS);
@@ -135,31 +154,46 @@ export default function App() {
   document.title = 'Dashboard Tickets INRED';
   }, []);
 
+  const fetchDataset = useCallback(async ({ background = false } = {}) => {
+    if (!background) {
+      setLoading(true);
+      setError('');
+    }
+
+    const stamp = Date.now();
+    const response = await fetch(`/data/dashboard-data.json?v=${stamp}`, {
+      cache: 'no-store',
+      headers: {
+        Pragma: 'no-cache',
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`No fue posible cargar la fuente analítica (${response.status}).`);
+    }
+
+    const payload = await response.json();
+    setData((prev) => {
+      const prevSig = `${prev?.meta?.generatedAt || ''}|${prev?.meta?.sourceFile || ''}|${prev?.meta?.recordCounts?.tickets || 0}`;
+      const nextSig = `${payload?.meta?.generatedAt || ''}|${payload?.meta?.sourceFile || ''}|${payload?.meta?.recordCounts?.tickets || 0}`;
+      if (background && prev && prevSig !== nextSig) {
+        setDataSyncNote(`Datos actualizados (${formatDateTime(payload?.meta?.generatedAt)}).`);
+      }
+      return payload;
+    });
+    window.__preloaderReady?.();
+    if (!background) {
+      setDataSyncNote('');
+    }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
 
     async function loadData() {
-      setLoading(true);
-      setError('');
       try {
-        if (window.__DASHBOARD_DATA__) {
-          if (!cancelled) {
-            setData(window.__DASHBOARD_DATA__);
-            window.__preloaderReady?.();
-          }
-          return;
-        }
-
-        const response = await fetch('/data/dashboard-data.json', { cache: 'no-store' });
-        if (!response.ok) {
-          throw new Error(`No fue posible cargar la fuente analítica (${response.status}).`);
-        }
-        const payload = await response.json();
-        if (!cancelled) {
-          setData(payload);
-          // Signal the preloader to begin its fade-out
-          window.__preloaderReady?.();
-        }
+        await fetchDataset({ background: false });
       } catch (loadError) {
         if (!cancelled) {
           setError(loadError instanceof Error ? loadError.message : 'Error desconocido cargando el dataset.');
@@ -173,7 +207,20 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [fetchDataset]);
+
+  useEffect(() => {
+    if (!currentUser) return undefined;
+    const timer = setInterval(async () => {
+      try {
+        await fetchDataset({ background: true });
+      } catch {
+        // En refresco en segundo plano no bloqueamos la UI actual.
+      }
+    }, DATA_REFRESH_MS);
+
+    return () => clearInterval(timer);
+  }, [currentUser, fetchDataset]);
 
   const context = useMemo(
     () => (data ? buildDashboardContext(data, {
@@ -350,9 +397,11 @@ export default function App() {
     const match = authUsers.find((user) => user.username === username && user.password === password);
     if (!match) {
       setAuthError('Usuario o contraseña inválidos.');
+      setAuthInfo('');
       return;
     }
     setAuthError('');
+    setAuthInfo('');
     setCurrentUser(match.username);
     localStorage.setItem(AUTH_SESSION_KEY, match.username);
     pushAuthLog('login', match.username);
@@ -374,10 +423,12 @@ export default function App() {
     const password = newUserForm.password.trim();
     if (!username || !password) {
       setAuthError('Debes ingresar usuario y contraseña para crear un usuario nuevo.');
+      setAuthInfo('');
       return;
     }
     if (authUsers.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
       setAuthError('Ese usuario ya existe.');
+      setAuthInfo('');
       return;
     }
     const nextUsers = [{ username, password, role: 'operator', createdAt: new Date().toISOString() }, ...authUsers];
@@ -385,7 +436,43 @@ export default function App() {
     saveUsers(nextUsers);
     pushAuthLog('create-user', `${currentUser || 'system'} -> ${username}`);
     setAuthError('');
+    setAuthInfo(`Usuario ${username} creado correctamente.`);
     setNewUserForm({ username: '', password: '' });
+  }
+
+  function handleRecoverPassword(event) {
+    event.preventDefault();
+    const username = recoverForm.username.trim();
+    const next = recoverForm.next.trim();
+    const confirm = recoverForm.confirm.trim();
+
+    if (!username || !next || !confirm) {
+      setAuthError('Completa usuario, nueva contraseña y confirmación.');
+      setAuthInfo('');
+      return;
+    }
+    if (next !== confirm) {
+      setAuthError('La confirmación no coincide con la nueva contraseña.');
+      setAuthInfo('');
+      return;
+    }
+
+    const exists = authUsers.some((user) => user.username.toLowerCase() === username.toLowerCase());
+    if (!exists) {
+      setAuthError('No existe un usuario con ese nombre.');
+      setAuthInfo('');
+      return;
+    }
+
+    const nextUsers = authUsers.map((user) => (
+      user.username.toLowerCase() === username.toLowerCase() ? { ...user, password: next } : user
+    ));
+    setAuthUsers(nextUsers);
+    saveUsers(nextUsers);
+    pushAuthLog('recover-password', username);
+    setAuthError('');
+    setAuthInfo(`Contraseña actualizada para ${username}.`);
+    setRecoverForm({ username: '', next: '', confirm: '' });
   }
 
   function handlePasswordChange(event) {
@@ -395,11 +482,13 @@ export default function App() {
     const next = passwordForm.next.trim();
     if (!next) {
       setAuthError('La nueva contraseña no puede estar vacía.');
+      setAuthInfo('');
       return;
     }
     const me = authUsers.find((user) => user.username === currentUser);
     if (!me || me.password !== current) {
       setAuthError('La contraseña actual no coincide.');
+      setAuthInfo('');
       return;
     }
     const nextUsers = authUsers.map((user) => user.username === currentUser ? { ...user, password: next } : user);
@@ -407,7 +496,14 @@ export default function App() {
     saveUsers(nextUsers);
     pushAuthLog('password-change', currentUser);
     setAuthError('');
+    setAuthInfo('Contraseña actualizada correctamente.');
     setPasswordForm({ current: '', next: '' });
+  }
+
+  function changeAuthMode(mode) {
+    setAuthMode(mode);
+    setAuthError('');
+    setAuthInfo('');
   }
 
   if (!currentUser) {
@@ -422,11 +518,39 @@ export default function App() {
             </div>
           </div>
           <p style={{ marginTop: 0, color: '#94a3b8', fontSize: '.82rem' }}>Autenticación básica local para gestión interna.</p>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 10 }}>
+            <button type="button" onClick={() => changeAuthMode('login')} style={authMode === 'login' ? authModeButtonActive : authModeButton}>Ingresar</button>
+            <button type="button" onClick={() => changeAuthMode('register')} style={authMode === 'register' ? authModeButtonActive : authModeButton}>Crear usuario</button>
+            <button type="button" onClick={() => changeAuthMode('recover')} style={authMode === 'recover' ? authModeButtonActive : authModeButton}>Recuperar contraseña</button>
+          </div>
           <div style={{ display: 'grid', gap: 10 }}>
-            <input type="text" placeholder="Usuario" value={loginForm.username} onChange={(e) => setLoginForm((v) => ({ ...v, username: e.target.value }))} style={authInputStyle} />
-            <input type="password" placeholder="Contraseña" value={loginForm.password} onChange={(e) => setLoginForm((v) => ({ ...v, password: e.target.value }))} style={authInputStyle} />
-            <button type="submit" style={authButtonStyle}>Ingresar</button>
+            {authMode === 'login' && (
+              <Fragment>
+                <input type="text" placeholder="Usuario" value={loginForm.username} onChange={(e) => setLoginForm((v) => ({ ...v, username: e.target.value }))} style={authInputStyle} />
+                <input type="password" placeholder="Contraseña" value={loginForm.password} onChange={(e) => setLoginForm((v) => ({ ...v, password: e.target.value }))} style={authInputStyle} />
+                <button type="submit" style={authButtonStyle}>Ingresar</button>
+              </Fragment>
+            )}
+
+            {authMode === 'register' && (
+              <Fragment>
+                <input type="text" placeholder="Usuario nuevo" value={newUserForm.username} onChange={(e) => setNewUserForm((v) => ({ ...v, username: e.target.value }))} style={authInputStyle} />
+                <input type="password" placeholder="Contraseña inicial" value={newUserForm.password} onChange={(e) => setNewUserForm((v) => ({ ...v, password: e.target.value }))} style={authInputStyle} />
+                <button type="button" onClick={handleCreateUser} style={authButtonStyle}>Crear usuario</button>
+              </Fragment>
+            )}
+
+            {authMode === 'recover' && (
+              <Fragment>
+                <input type="text" placeholder="Usuario" value={recoverForm.username} onChange={(e) => setRecoverForm((v) => ({ ...v, username: e.target.value }))} style={authInputStyle} />
+                <input type="password" placeholder="Nueva contraseña" value={recoverForm.next} onChange={(e) => setRecoverForm((v) => ({ ...v, next: e.target.value }))} style={authInputStyle} />
+                <input type="password" placeholder="Confirmar nueva contraseña" value={recoverForm.confirm} onChange={(e) => setRecoverForm((v) => ({ ...v, confirm: e.target.value }))} style={authInputStyle} />
+                <button type="button" onClick={handleRecoverPassword} style={authButtonStyle}>Actualizar contraseña</button>
+              </Fragment>
+            )}
+
             {authError && <div style={{ color: '#fca5a5', fontSize: '.78rem' }}>{authError}</div>}
+            {authInfo && <div style={{ color: '#86efac', fontSize: '.78rem' }}>{authInfo}</div>}
           </div>
           <div style={{ marginTop: 14, fontSize: '.72rem', color: '#64748b' }}>Usuarios activos guardados: {authUsers.length}</div>
         </form>
@@ -453,6 +577,29 @@ export default function App() {
           <small>Error de inicialización</small>
           <h1>No se pudo cargar la aplicación</h1>
           <p>{error || 'No hay datos disponibles para construir el dashboard.'}</p>
+        </div>
+      </div>
+    );
+  }
+
+  const hasNoData =
+    !Array.isArray(data?.tickets) ||
+    data.tickets.length === 0 ||
+    data?.meta?.sourceFile === '(sin-archivo-drive)';
+
+  if (hasNoData) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'linear-gradient(160deg,#0b2f6b 0%, #0a3e93 45%, #0e5ac4 100%)', padding: 24 }}>
+        <div style={{ width: 'min(760px, 100%)', borderRadius: 16, border: '1px solid rgba(191,219,254,.35)', background: 'rgba(6,24,57,.35)', boxShadow: '0 24px 60px rgba(2,6,23,.35)', padding: '28px 30px', color: '#dbeafe' }}>
+          <div style={{ fontSize: '.74rem', fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: '#bfdbfe', marginBottom: 8 }}>Dashboard INRED</div>
+          <h1 style={{ margin: '0 0 10px', fontSize: '1.55rem', color: '#eff6ff' }}>Sin datos para cargar</h1>
+          <p style={{ margin: 0, fontSize: '.92rem', color: '#dbeafe', lineHeight: 1.55 }}>
+            No se encontró un archivo Excel válido en la carpeta de Drive configurada.
+            Cuando se publique un nuevo Excel en Drive, el dashboard se actualizará automáticamente.
+          </p>
+          <div style={{ marginTop: 14, fontSize: '.78rem', color: '#bfdbfe' }}>
+            Última generación: {formatDateTime(data?.meta?.generatedAt)}
+          </div>
         </div>
       </div>
     );
@@ -668,6 +815,9 @@ export default function App() {
                     <div><em>Alta prioridad</em><strong>{context.tickets.filter((t) => t.priority === 'Alta').length}</strong></div>
                   </div>
                   <div className="user-panel__meta">Generado {formatDateTime(data.meta?.generatedAt)}</div>
+                  {dataSyncNote && (
+                    <div style={{ marginTop: 8, fontSize: '.68rem', color: '#86efac' }}>{dataSyncNote}</div>
+                  )}
                   <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
                     <form onSubmit={handlePasswordChange} style={{ display: 'grid', gap: 6 }}>
                       <div style={{ fontSize: '.68rem', color: '#93c5fd', fontWeight: 700 }}>Cambiar contraseña</div>
@@ -2257,6 +2407,24 @@ const authButtonStyle = {
   fontWeight: 700,
   cursor: 'pointer',
   padding: '10px 12px',
+};
+
+const authModeButton = {
+  background: 'rgba(15,23,42,.55)',
+  border: '1px solid rgba(148,163,184,.2)',
+  borderRadius: 8,
+  color: '#94a3b8',
+  fontWeight: 600,
+  cursor: 'pointer',
+  padding: '7px 10px',
+  fontSize: '.75rem',
+};
+
+const authModeButtonActive = {
+  ...authModeButton,
+  background: 'rgba(37,99,235,.2)',
+  border: '1px solid rgba(147,197,253,.45)',
+  color: '#dbeafe',
 };
 
 const miniInputStyle = {
