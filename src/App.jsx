@@ -1,5 +1,7 @@
 import { AlertCircle, AlertTriangle, Bell, CheckCircle, Clock, Layers, Search, ShieldCheck, Sparkles, Timer, TrendingDown, User, Users, Zap } from './components/Icons';
-import { Fragment, startTransition, useCallback, useEffect, useMemo, useState, useDeferredValue } from 'react';
+import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from 'react';
+import * as XLSX from 'xlsx-js-style';
+import { getDownloadURL, getMetadata, ref as storageRef, uploadBytes } from 'firebase/storage';
 
 import { BarList, GeoMap, LineChart, Pie3D, StackedRows } from './components/Charts';
 import { DataTable } from './components/DataTable';
@@ -35,6 +37,7 @@ import {
   sanitizeFilters,
   computeANS,
 } from './lib/analytics';
+import { firebaseStorage } from './lib/firebaseClient';
 
 // ─── KPI icon map ─────────────────────────────────────────────────────
 const KPI_ICONS = [
@@ -59,7 +62,6 @@ const KPI_DRILL = [
 const AUTH_USERS_KEY = 'inred.auth.users.v1';
 const AUTH_LOGS_KEY = 'inred.auth.logs.v1';
 const AUTH_SESSION_KEY = 'inred.auth.session.v1';
-const DATA_REFRESH_MS = 60000;
 
 const DEFAULT_AUTH_USERS = [
   { username: 'Allan_ADMIN', password: '150425', role: 'admin', createdAt: new Date().toISOString() },
@@ -115,6 +117,7 @@ function saveLogs(logs) {
 }
 
 export default function App() {
+  const uploadInputRef = useRef(null);
   const [authUsers, setAuthUsers] = useState(() => loadUsers());
   const [authLogs, setAuthLogs] = useState(() => loadLogs());
   const [currentUser, setCurrentUser] = useState(() => localStorage.getItem(AUTH_SESSION_KEY) || '');
@@ -127,9 +130,12 @@ export default function App() {
   const [recoverForm, setRecoverForm] = useState({ username: '', next: '', confirm: '' });
 
   const [data, setData] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [dataSyncNote, setDataSyncNote] = useState('');
+  const [sharedFileMeta, setSharedFileMeta] = useState(null);
+  const [uploadInfo, setUploadInfo] = useState('');
+  const [uploadError, setUploadError] = useState('');
   const [view, setView] = useState('general');
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [flags, setFlags] = useState(DEFAULT_FLAGS);
@@ -154,73 +160,75 @@ export default function App() {
   document.title = 'Dashboard Tickets INRED';
   }, []);
 
-  const fetchDataset = useCallback(async ({ background = false } = {}) => {
+  useEffect(() => {
+    window.__preloaderReady?.();
+  }, []);
+
+  const loadSharedExcel = useCallback(async ({ background = false } = {}) => {
     if (!background) {
       setLoading(true);
       setError('');
     }
-
-    const stamp = Date.now();
-    const response = await fetch(`/data/dashboard-data.json?v=${stamp}`, {
-      cache: 'no-store',
-      headers: {
-        Pragma: 'no-cache',
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`No fue posible cargar la fuente analítica (${response.status}).`);
-    }
-
-    const payload = await response.json();
-    setData((prev) => {
-      const prevSig = `${prev?.meta?.generatedAt || ''}|${prev?.meta?.sourceFile || ''}|${prev?.meta?.recordCounts?.tickets || 0}`;
-      const nextSig = `${payload?.meta?.generatedAt || ''}|${payload?.meta?.sourceFile || ''}|${payload?.meta?.recordCounts?.tickets || 0}`;
-      if (background && prev && prevSig !== nextSig) {
-        setDataSyncNote(`Datos actualizados (${formatDateTime(payload?.meta?.generatedAt)}).`);
+    try {
+      const fileRef = storageRef(firebaseStorage, 'dashboard/latest.xlsx');
+      const [meta, downloadURL] = await Promise.all([
+        getMetadata(fileRef),
+        getDownloadURL(fileRef),
+      ]);
+      const bustURL = `${downloadURL}${downloadURL.includes('?') ? '&' : '?'}t=${Date.now()}`;
+      const response = await fetch(bustURL, { cache: 'no-store' });
+      if (!response.ok) {
+        throw new Error('No se pudo descargar el Excel compartido.');
       }
-      return payload;
-    });
-    window.__preloaderReady?.();
-    if (!background) {
-      setDataSyncNote('');
+      const arrayBuffer = await response.arrayBuffer();
+      const payload = parseExcelToDashboardPayload(meta.name || 'latest.xlsx', arrayBuffer);
+      setData(payload);
+      setSharedFileMeta({
+        name: meta.name || 'latest.xlsx',
+        updated: meta.updated || '',
+      });
+      setDataSyncNote(`Fuente global activa: ${meta.name || 'latest.xlsx'} (${formatDateTime(meta.updated)})`);
+      setUploadError('');
+    } catch (loadErr) {
+      const code = loadErr && typeof loadErr === 'object' ? loadErr.code : '';
+      if (code === 'storage/object-not-found') {
+        setData(null);
+        setSharedFileMeta(null);
+        setDataSyncNote('Aún no hay archivo global cargado.');
+        setUploadInfo('Aún no hay Excel global. Adjunta el primero para iniciar el dashboard compartido.');
+        setUploadError('');
+      } else {
+        setError(loadErr instanceof Error ? loadErr.message : 'No se pudo cargar la fuente global.');
+      }
+    } finally {
+      if (!background) {
+        setLoading(false);
+        window.__preloaderReady?.();
+      }
     }
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-
-    async function loadData() {
-      try {
-        await fetchDataset({ background: false });
-      } catch (loadError) {
-        if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : 'Error desconocido cargando el dataset.');
-        }
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }
-
-    loadData();
-    return () => {
-      cancelled = true;
-    };
-  }, [fetchDataset]);
+    if (!currentUser) return;
+    loadSharedExcel();
+  }, [currentUser, loadSharedExcel]);
 
   useEffect(() => {
-    if (!currentUser) return undefined;
+    if (!currentUser) return;
     const timer = setInterval(async () => {
       try {
-        await fetchDataset({ background: true });
+        const fileRef = storageRef(firebaseStorage, 'dashboard/latest.xlsx');
+        const meta = await getMetadata(fileRef);
+        if (!meta.updated) return;
+        if (!sharedFileMeta?.updated || meta.updated !== sharedFileMeta.updated) {
+          await loadSharedExcel({ background: true });
+        }
       } catch {
-        // En refresco en segundo plano no bloqueamos la UI actual.
+        // Silently ignore transient polling errors
       }
-    }, DATA_REFRESH_MS);
-
+    }, 45000);
     return () => clearInterval(timer);
-  }, [currentUser, fetchDataset]);
+  }, [currentUser, loadSharedExcel, sharedFileMeta?.updated]);
 
   const context = useMemo(
     () => (data ? buildDashboardContext(data, {
@@ -500,6 +508,40 @@ export default function App() {
     setPasswordForm({ current: '', next: '' });
   }
 
+  async function handleLocalExcelUpload(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    try {
+      setUploadError('');
+      setUploadInfo('Subiendo archivo global...');
+      const arrayBuffer = await file.arrayBuffer();
+      const fileRef = storageRef(firebaseStorage, 'dashboard/latest.xlsx');
+      await uploadBytes(fileRef, new Blob([arrayBuffer], { type: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), {
+        contentType: file.type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        cacheControl: 'no-cache',
+        customMetadata: {
+          uploadedBy: currentUser || 'unknown',
+          uploadedAt: new Date().toISOString(),
+        },
+      });
+      const payload = parseExcelToDashboardPayload(file.name, arrayBuffer);
+      setData(payload);
+      setSharedFileMeta({ name: file.name, updated: new Date().toISOString() });
+      setDataSyncNote(`Fuente global actualizada por ${currentUser}: ${file.name}`);
+      setUploadInfo(`Excel global actualizado (${formatInteger(payload.meta?.recordCounts?.tickets || 0)} tickets).`);
+    } catch (uploadErr) {
+      const code = uploadErr && typeof uploadErr === 'object' ? uploadErr.code : '';
+      if (code === 'storage/unauthorized') {
+        setUploadError('No hay permisos para escribir en Storage. Revisa las reglas de Firebase Storage.');
+      } else {
+        setUploadError(uploadErr instanceof Error ? uploadErr.message : 'No se pudo cargar el archivo Excel global.');
+      }
+      setUploadInfo('');
+    } finally {
+      event.target.value = '';
+    }
+  }
+
   function changeAuthMode(mode) {
     setAuthMode(mode);
     setAuthError('');
@@ -570,13 +612,49 @@ export default function App() {
     );
   }
 
-  if (error || !context || !data) {
+  if (error) {
     return (
       <div className="loading-shell">
         <div className="loading-shell__card loading-shell__card--error">
           <small>Error de inicialización</small>
           <h1>No se pudo cargar la aplicación</h1>
           <p>{error || 'No hay datos disponibles para construir el dashboard.'}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'grid', placeItems: 'center', background: 'linear-gradient(160deg,#0b2f6b 0%, #0a3e93 45%, #0e5ac4 100%)', padding: 24 }}>
+        <div style={{ width: 'min(760px, 100%)', borderRadius: 16, border: '1px solid rgba(191,219,254,.35)', background: 'rgba(6,24,57,.35)', boxShadow: '0 24px 60px rgba(2,6,23,.35)', padding: '28px 30px', color: '#dbeafe' }}>
+          <div style={{ fontSize: '.74rem', fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: '#bfdbfe', marginBottom: 8 }}>Dashboard INRED</div>
+          <h1 style={{ margin: '0 0 10px', fontSize: '1.55rem', color: '#eff6ff' }}>Adjunta un Excel para comenzar</h1>
+          <p style={{ margin: 0, fontSize: '.92rem', color: '#dbeafe', lineHeight: 1.55 }}>
+            Este dashboard usa una fuente global compartida.
+            Usa "Adjuntar Excel" en el panel de usuario para publicar el archivo para todos los usuarios.
+          </p>
+          <div style={{ marginTop: 16 }}>
+            <button
+              type="button"
+              className="view-tab"
+              style={{ fontSize: '.8rem', padding: '8px 14px' }}
+              onClick={() => {
+                uploadInputRef.current?.click();
+              }}
+            >
+              Adjuntar Excel
+            </button>
+          </div>
+          {uploadInfo && <div style={{ marginTop: 10, fontSize: '.75rem', color: '#86efac' }}>{uploadInfo}</div>}
+          {uploadError && <div style={{ marginTop: 10, fontSize: '.75rem', color: '#fca5a5' }}>{uploadError}</div>}
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={handleLocalExcelUpload}
+            style={{ display: 'none' }}
+          />
         </div>
       </div>
     );
@@ -594,12 +672,33 @@ export default function App() {
           <div style={{ fontSize: '.74rem', fontWeight: 700, letterSpacing: '.08em', textTransform: 'uppercase', color: '#bfdbfe', marginBottom: 8 }}>Dashboard INRED</div>
           <h1 style={{ margin: '0 0 10px', fontSize: '1.55rem', color: '#eff6ff' }}>Sin datos para cargar</h1>
           <p style={{ margin: 0, fontSize: '.92rem', color: '#dbeafe', lineHeight: 1.55 }}>
-            No se encontró un archivo Excel válido en la carpeta de Drive configurada.
-            Cuando se publique un nuevo Excel en Drive, el dashboard se actualizará automáticamente.
+            No hay registros disponibles en el Excel cargado.
+            Adjunta otro archivo para volver a alimentar el dashboard.
           </p>
           <div style={{ marginTop: 14, fontSize: '.78rem', color: '#bfdbfe' }}>
             Última generación: {formatDateTime(data?.meta?.generatedAt)}
           </div>
+          <div style={{ marginTop: 16 }}>
+            <button
+              type="button"
+              className="view-tab"
+              style={{ fontSize: '.8rem', padding: '8px 14px' }}
+              onClick={() => {
+                uploadInputRef.current?.click();
+              }}
+            >
+              Adjuntar Excel
+            </button>
+          </div>
+          {uploadInfo && <div style={{ marginTop: 10, fontSize: '.75rem', color: '#86efac' }}>{uploadInfo}</div>}
+          {uploadError && <div style={{ marginTop: 10, fontSize: '.75rem', color: '#fca5a5' }}>{uploadError}</div>}
+          <input
+            ref={uploadInputRef}
+            type="file"
+            accept=".xlsx,.xls"
+            onChange={handleLocalExcelUpload}
+            style={{ display: 'none' }}
+          />
         </div>
       </div>
     );
@@ -628,10 +727,19 @@ export default function App() {
             <p className="top-header__meta">
               Generado {formatDateTime(data.meta?.generatedAt)} ·{' '}
               {formatInteger(baseTicketCount)} tickets base ·{' '}
-              {formatInteger(baseStopEventCount)} eventos de parada
+              {formatInteger(baseStopEventCount)} eventos de parada ·{' '}
+              Fuente: Excel global compartido
             </p>
           </div>
           <div className="top-header__right">
+            <button
+              type="button"
+              className="view-tab"
+              style={{ fontSize: '.72rem', padding: '6px 10px', marginRight: 6 }}
+              onClick={() => uploadInputRef.current?.click()}
+            >
+              Adjuntar Excel
+            </button>
             <div style={{ display: 'flex', background: 'rgba(255,255,255,.05)', borderRadius: 6, padding: 2 }}>
               <button
                 type="button"
@@ -818,6 +926,32 @@ export default function App() {
                   {dataSyncNote && (
                     <div style={{ marginTop: 8, fontSize: '.68rem', color: '#86efac' }}>{dataSyncNote}</div>
                   )}
+                  <div style={{ borderTop: '1px solid rgba(255,255,255,.08)', marginTop: 10, paddingTop: 10, display: 'grid', gap: 6 }}>
+                    <div style={{ fontSize: '.68rem', color: '#93c5fd', fontWeight: 700 }}>Fuente de datos</div>
+                    <div style={{ fontSize: '.68rem', color: '#cbd5e1' }}>
+                      Modo actual: Excel global compartido
+                      {sharedFileMeta?.updated ? ` · actualizado ${formatDateTime(sharedFileMeta.updated)}` : ''}
+                    </div>
+                    <input
+                      ref={uploadInputRef}
+                      type="file"
+                      accept=".xlsx,.xls"
+                      onChange={handleLocalExcelUpload}
+                      style={{ display: 'none' }}
+                    />
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <button
+                        type="button"
+                        className="view-tab"
+                        style={{ fontSize: '.7rem', flex: 1 }}
+                        onClick={() => uploadInputRef.current?.click()}
+                      >
+                        Adjuntar Excel
+                      </button>
+                    </div>
+                    {uploadInfo && <div style={{ fontSize: '.66rem', color: '#86efac' }}>{uploadInfo}</div>}
+                    {uploadError && <div style={{ fontSize: '.66rem', color: '#fca5a5' }}>{uploadError}</div>}
+                  </div>
                   <div style={{ display: 'grid', gap: 8, marginTop: 10 }}>
                     <form onSubmit={handlePasswordChange} style={{ display: 'grid', gap: 6 }}>
                       <div style={{ fontSize: '.68rem', color: '#93c5fd', fontWeight: 700 }}>Cambiar contraseña</div>
@@ -2497,6 +2631,140 @@ function TiempoRestanteBadge({ ans }) {
       </span>
     </span>
   );
+}
+
+function parseExcelToDashboardPayload(fileName, arrayBuffer) {
+  const workbook = XLSX.read(arrayBuffer, { type: 'array', cellDates: true });
+  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  if (!firstSheet) {
+    throw new Error('El archivo no contiene hojas válidas.');
+  }
+
+  const rows = XLSX.utils.sheet_to_json(firstSheet, { defval: '' });
+  const tickets = rows
+    .map((row) => mapExcelRowToTicket(row))
+    .filter(Boolean);
+
+  return {
+    meta: {
+      sourceFile: fileName,
+      generatedAt: new Date().toISOString(),
+      sheetNames: workbook.SheetNames,
+      recordCounts: {
+        tickets: tickets.length,
+        stopEvents: 0,
+        orphanStopTickets: 0,
+      },
+      coverage: {
+        clientCreatedPct: 0,
+        technicianPct: 0,
+        maintenancePct: 0,
+        resolutionCommentPct: 0,
+      },
+      geoCoverage: {},
+      nlpSummary: {},
+      warnings: ['Modo local: datos cargados desde Excel adjunto en la sesión actual.'],
+    },
+    tickets,
+    stopEvents: [],
+  };
+}
+
+function mapExcelRowToTicket(row) {
+  const ticketId = normalizeTicketId(readAny(row, ['#Ticket', 'Ticket #']));
+  if (!ticketId) return null;
+
+  const ticketStart = toIsoDate(readAny(row, ['Fecha Inicio']));
+  const ticketEnd = toIsoDate(readAny(row, ['Ticket Fecha Fin']));
+  const clientCreated = toIsoDate(readAny(row, ['Fecha Creacion Cliente']));
+
+  const closeDurationDays = ticketStart && ticketEnd
+    ? Math.max(0, (new Date(ticketEnd).getTime() - new Date(ticketStart).getTime()) / 86400000)
+    : null;
+
+  return {
+    ticketId,
+    operatorCode: cleanAny(readAny(row, ['Código Operador', 'Codigo Operador'])),
+    clientCode: normalizeTicketId(readAny(row, ['Código Cliente', 'Codigo Cliente'])),
+    department: cleanAny(readAny(row, ['Departamento'])),
+    municipality: cleanAny(readAny(row, ['Municipio'])),
+    locality: cleanAny(readAny(row, ['Centro Poblado'])),
+    ticketStart,
+    ticketEnd,
+    referenceDate: clientCreated || ticketStart,
+    ticketState: cleanAny(readAny(row, ['Ticket Estado'])) || 'Sin dato',
+    creator: cleanAny(readAny(row, ['Usuario Crea'])),
+    assignee: cleanAny(readAny(row, ['Asignado A'])),
+    closer: cleanAny(readAny(row, ['Usuario Cierre'])),
+    maintenanceId: normalizeTicketId(readAny(row, ['Mantenimiento Id'])),
+    maintenanceStart: toIsoDate(readAny(row, ['Fecha Inicio Mantenimiento'])),
+    technician: cleanAny(readAny(row, ['Tecnico Asignado', 'Técnico Asignado'])),
+    maintenanceCreator: cleanAny(readAny(row, ['Usuario Crea Mnt'])),
+    maintenanceEnd: toIsoDate(readAny(row, ['Fecha Fin Mnt'])),
+    maintenanceCloser: cleanAny(readAny(row, ['Usuario Cierre Mnt'])),
+    maintenanceState: cleanAny(readAny(row, ['Estado Mnt'])),
+    category: cleanAny(readAny(row, ['Categoria', 'Categoría'])),
+    sourceOrigin: cleanAny(readAny(row, ['Fuente Origen'])),
+    escalationGroup: cleanAny(readAny(row, ['Grupo Escalamiento'])),
+    impact: cleanAny(readAny(row, ['Impacto'])),
+    urgency: cleanAny(readAny(row, ['Urgencia'])),
+    priority: cleanAny(readAny(row, ['Prioridad'])) || 'Sin dato',
+    subProject: cleanAny(readAny(row, ['Sub Proyecto'])),
+    project: cleanAny(readAny(row, ['Proyecto'])),
+    type: cleanAny(readAny(row, ['Tipo'])),
+    responsible: cleanAny(readAny(row, ['Responsable'])),
+    clientCreated,
+    infoSource: cleanAny(readAny(row, ['Fuente Información', 'Fuente Informacion'])),
+    openingComment: cleanAny(readAny(row, ['Comentario Apertura'])),
+    resolutionComment: cleanAny(readAny(row, ['Comentario Solución', 'Comentario Solucion'])),
+    beneficiaryId: null,
+    stopDaysTotal: 0,
+    stopSegmentCount: 0,
+    stopStart: null,
+    stopEnd: null,
+    faultStart: null,
+    faultEnd: null,
+    faultDurationDays: null,
+    closeDurationDays,
+    openAgeDays: null,
+    geo: null,
+  };
+}
+
+function readAny(row, keys) {
+  for (const key of keys) {
+    if (Object.prototype.hasOwnProperty.call(row, key)) {
+      return row[key];
+    }
+  }
+  return '';
+}
+
+function cleanAny(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim();
+}
+
+function normalizeTicketId(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const raw = String(value).trim();
+  if (/^\d+\.0$/.test(raw)) return raw.slice(0, -2);
+  return raw;
+}
+
+function toIsoDate(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (value instanceof Date && Number.isFinite(value.getTime())) {
+    return value.toISOString();
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const parsed = XLSX.SSF.parse_date_code(value);
+    if (!parsed) return null;
+    const date = new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d, parsed.H || 0, parsed.M || 0, parsed.S || 0));
+    return Number.isFinite(date.getTime()) ? date.toISOString() : null;
+  }
+  const date = new Date(String(value));
+  return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
 function TextSnippet({ text, query }) {
