@@ -1,7 +1,7 @@
 import { AlertCircle, AlertTriangle, Bell, CheckCircle, Clock, Layers, Search, ShieldCheck, Sparkles, Timer, TrendingDown, User, Users, Zap } from './components/Icons';
 import { Fragment, startTransition, useCallback, useEffect, useMemo, useRef, useState, useDeferredValue } from 'react';
 import * as XLSX from 'xlsx-js-style';
-import { getDownloadURL, getMetadata, ref as storageRef, uploadBytes } from 'firebase/storage';
+import { getBytes, getMetadata, ref as storageRef, uploadBytes } from 'firebase/storage';
 
 import { BarList, GeoMap, LineChart, Pie3D, StackedRows } from './components/Charts';
 import { DataTable } from './components/DataTable';
@@ -171,16 +171,11 @@ export default function App() {
     }
     try {
       const fileRef = storageRef(firebaseStorage, 'dashboard/latest.xlsx');
-      const [meta, downloadURL] = await Promise.all([
+      const [meta, bytes] = await Promise.all([
         getMetadata(fileRef),
-        getDownloadURL(fileRef),
+        getBytes(fileRef),
       ]);
-      const bustURL = `${downloadURL}${downloadURL.includes('?') ? '&' : '?'}t=${Date.now()}`;
-      const response = await fetch(bustURL, { cache: 'no-store' });
-      if (!response.ok) {
-        throw new Error('No se pudo descargar el Excel compartido.');
-      }
-      const arrayBuffer = await response.arrayBuffer();
+      const arrayBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
       const payload = parseExcelToDashboardPayload(meta.name || 'latest.xlsx', arrayBuffer);
       setData(payload);
       setSharedFileMeta({
@@ -198,7 +193,12 @@ export default function App() {
         setUploadInfo('Aún no hay Excel global. Adjunta el primero para iniciar el dashboard compartido.');
         setUploadError('');
       } else {
-        setError(loadErr instanceof Error ? loadErr.message : 'No se pudo cargar la fuente global.');
+        setData(null);
+        setSharedFileMeta(null);
+        setError('');
+        setDataSyncNote('No se pudo cargar la última fuente global.');
+        setUploadInfo('Puedes volver a adjuntar el Excel para restaurar los datos compartidos.');
+        setUploadError(loadErr instanceof Error ? loadErr.message : 'No se pudo cargar la fuente global.');
       }
     } finally {
       if (!background) {
